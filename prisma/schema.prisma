@@ -1,0 +1,287 @@
+// ─── Generator & Datasource ───────────────────────────────
+generator client {
+  provider = "prisma-client-js"
+  output   = "../app/generated/prisma"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+// ─── Enums ────────────────────────────────────────────────
+enum Role {
+  ADMIN
+  TEACHER
+  STUDENT
+}
+
+enum QuizStatus {
+  Draft
+  Published
+}
+
+enum Difficulty {
+  Easy
+  Medium
+  Hard
+}
+
+enum QuestionType {
+  MULTIPLE_CHOICE
+  TRUE_FALSE
+}
+
+enum CreationMethod {
+  MANUAL
+  AI
+}
+
+// ─── Models ───────────────────────────────────────────────
+
+// Người dùng hệ thống: Admin / Teacher / Student
+model User {
+  id          String       @id @default(cuid())
+  email       String       @unique
+  password    String
+  name        String?      // full name = firstName + " " + lastName (kept for compat)
+  firstName   String?
+  lastName    String?
+  bio         String?
+  role        Role         @default(STUDENT)
+  banned      Boolean      @default(false)
+
+  quizzes          Quiz[]        // teacher/student: danh sách quiz đã tạo
+  questionBanks    QuestionBank[]
+  submissions      Submission[]  // student: lịch sử bài đã làm (nếu có tài khoản)
+  reports          Report[]      @relation("UserReports")
+  classes          Class[]       @relation("TeacherClasses")
+  enrollments      Enrollment[]  @relation("StudentEnrollments")
+  studyGroupSessions Session[]   @relation("StudentCreatedSessions")
+
+  createdAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  avatarUrl   String?
+}
+
+// Lớp học do Teacher tạo để quản lý học sinh
+model Class {
+  id          String       @id @default(cuid())
+  name        String
+  description String?
+  teacherId   String
+  teacher     User         @relation("TeacherClasses", fields: [teacherId], references: [id])
+  enrollments Enrollment[]
+  sessions    Session[]
+  createdAt   DateTime     @default(now())
+  @@index([teacherId])
+}
+
+// Đăng ký học sinh vào lớp
+model Enrollment {
+  id        String   @id @default(cuid())
+  classId   String
+  class     Class    @relation(fields: [classId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation("StudentEnrollments", fields: [userId], references: [id], onDelete: Cascade)
+  joinedAt  DateTime @default(now())
+  @@unique([classId, userId])
+  @@index([userId])
+}
+
+// Bộ câu hỏi do Teacher hoặc Student tạo
+model Quiz {
+  id           String     @id @default(cuid())
+  title        String
+  description  String?
+  category     String
+  difficulty   Difficulty @default(Medium)
+  timeLimit    Int        @default(15)    // phút — dùng làm gợi ý khi tạo session
+  passingScore Int        @default(70)    // % điểm để pass
+  visibility   String     @default("Private")  // "Public" | "Private"
+
+  status         QuizStatus     @default(Draft)
+  creationMethod CreationMethod @default(MANUAL)
+
+  creatorId    String
+  creator      User       @relation(fields: [creatorId], references: [id])
+
+  questions    Question[]
+  sessions     Session[]
+  reports      Report[]
+
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+
+  @@index([creatorId])
+  @@index([category])
+}
+
+// Câu hỏi trong Quiz
+model Question {
+  id     String       @id @default(cuid())
+  text   String
+  type   QuestionType @default(MULTIPLE_CHOICE)
+  points Int          @default(10)
+  order  Int          @default(0)
+
+  quizId String
+  quiz   Quiz         @relation(fields: [quizId], references: [id], onDelete: Cascade)
+
+  options Option[]
+
+  @@index([quizId])
+}
+
+// Đáp án của câu hỏi
+model Option {
+  id        String   @id @default(cuid())
+  text      String
+  isCorrect Boolean  @default(false)
+
+  questionId String
+  question   Question @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@index([questionId])
+}
+
+// Phiên thi do Teacher tạo (1 event = 1 session) hoặc Student tạo (study group)
+// status: "Upcoming" | "Active" | "Completed"
+model Session {
+  id              String    @id @default(cuid())
+  title           String                        // tên bài thi (vd: "Kiểm tra 15 phút HK1")
+  pin             String    @unique             // mã 6 số để học sinh join nhanh
+  status          String    @default("Upcoming")
+
+  scheduledAt     DateTime?                     // thời điểm dự kiến bắt đầu
+  durationMinutes Int       @default(45)        // thời gian làm bài (override quiz.timeLimit)
+  targetClass     String?                       // lớp học dự kiến (vd: "10A1", "All") - legacy
+
+  classId         String?                       // linked Class entity (null = public)
+  class           Class?    @relation(fields: [classId], references: [id], onDelete: SetNull)
+
+  invitedEmails   String?                       // JSON: ["email1@x.com"] — extra invitees outside class
+  studentCreatorId String?                      // if set = study group session created by a student
+  studentCreator  User?     @relation("StudentCreatedSessions", fields: [studentCreatorId], references: [id], onDelete: SetNull)
+
+  quizId          String
+  quiz            Quiz      @relation(fields: [quizId], references: [id], onDelete: Cascade)
+
+  submissions     Submission[]
+
+  createdAt       DateTime  @default(now())
+  endTime         DateTime?                     // thời điểm Teacher đóng bài
+
+  @@index([quizId])
+  @@index([studentCreatorId])
+}
+
+// Bài làm của Student trong 1 Session
+model Submission {
+  id               String   @id @default(cuid())
+  nickname         String                        // tên tự nhập khi vào thi
+
+  totalScore       Float    @default(0)          // điểm đạt được
+  maxScore         Float    @default(0)          // điểm tối đa (sum question.points)
+  timeTakenSeconds Int      @default(0)          // thời gian làm bài (giây)
+
+  sessionId        String
+  session          Session  @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  // Student có tài khoản: userId được link → xem lịch sử
+  // Student anonymous: userId = null
+  userId           String?
+  user             User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  answers          Answer[]
+
+  createdAt        DateTime @default(now())
+
+  @@index([sessionId])
+  @@index([userId])
+}
+
+// Report quiz vi phạm
+model Report {
+  id          String   @id @default(cuid())
+  reason      String   // "Inappropriate" | "Spam" | "Incorrect" | "Other"
+  description String?
+  status      String   @default("Pending") // "Pending" | "Resolved" | "Rejected"
+
+  quizId      String
+  quiz        Quiz     @relation(fields: [quizId], references: [id], onDelete: Cascade)
+
+  reporterId  String
+  reporter    User     @relation("UserReports", fields: [reporterId], references: [id], onDelete: Cascade)
+
+  createdAt   DateTime @default(now())
+
+  @@unique([quizId, reporterId])
+  @@index([quizId])
+  @@index([reporterId])
+}
+
+// Từng câu trả lời của Student
+model Answer {
+  id               String @id @default(cuid())
+  questionId       String                        // câu hỏi nào
+  selectedOptionId String                        // đáp án học sinh chọn (Option.id)
+  isCorrect        Boolean                       // precomputed khi submit để tránh re-join
+
+  submissionId     String
+  submission       Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId])
+  @@index([questionId])
+}
+
+// ─── Question Bank (AI-generated question pools) ──────────────────────────────
+
+// Bộ câu hỏi do AI tạo ra từ file/text
+model QuestionBank {
+  id          String         @id @default(cuid())
+  name        String
+  subject     String
+  sourceType  String         // "FILE" | "TEXT"
+  sourceFile  String?        // tên file gốc nếu upload
+  userId      String
+  user        User           @relation(fields: [userId], references: [id])
+  questions   BankQuestion[]
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([userId])
+}
+
+// Câu hỏi trong ngân hàng
+model BankQuestion {
+  id         String       @id @default(cuid())
+  text       String
+  type       QuestionType @default(MULTIPLE_CHOICE)
+  difficulty Difficulty   @default(Medium)
+  points     Int          @default(10)
+  order      Int          @default(0)
+  bankId     String
+  bank       QuestionBank @relation(fields: [bankId], references: [id], onDelete: Cascade)
+  options    BankOption[]
+  createdAt  DateTime     @default(now())
+
+  @@index([bankId])
+}
+
+// Đáp án của câu hỏi trong ngân hàng
+model BankOption {
+  id         String       @id @default(cuid())
+  text       String
+  isCorrect  Boolean      @default(false)
+  questionId String
+  question   BankQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@index([questionId])
+}
+
+// Admin key-value settings (ai provider, api key, model)
+model Setting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
